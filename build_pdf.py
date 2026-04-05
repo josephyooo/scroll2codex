@@ -7,6 +7,7 @@ Usage:
     python build_pdf.py --captures capture/ --out book.pdf --split-height 3000
 """
 import argparse
+import re
 import subprocess
 from pathlib import Path
 
@@ -188,6 +189,48 @@ def parse_crop(s):
     return tuple(parts)
 
 
+def parse_chapters(s):
+    """Parse a chapter spec like '0-8', '9-23', '0-8,15,17-19' into a set of ints.
+    Returns None when s is empty (meaning: all chapters).
+    """
+    if not s:
+        return None
+    result = set()
+    for part in s.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            lo_s, hi_s = part.split("-", 1)
+            lo, hi = int(lo_s), int(hi_s)
+            if hi < lo:
+                raise argparse.ArgumentTypeError(f"bad range: {part}")
+            result.update(range(lo, hi + 1))
+        else:
+            result.add(int(part))
+    return result
+
+
+def ch_index(name: str):
+    """Extract the spine index from a chapter dir/file name like 'ch10' -> 10."""
+    m = re.match(r"ch(\d+)", name)
+    return int(m.group(1)) if m else None
+
+
+def assemble_pdf(page_images, out_path: Path, ocr: bool, ocr_lang: str):
+    print(f"Assembling PDF from {len(page_images)} pages -> {out_path}")
+    with open(out_path, "wb") as f:
+        f.write(img2pdf.convert([str(p) for p in page_images]))
+    if ocr:
+        ocr_out = out_path.with_name(out_path.stem + "_ocr.pdf")
+        print(f"    OCR -> {ocr_out}")
+        subprocess.run(
+            ["ocrmypdf", "-l", ocr_lang, "--output-type", "pdf",
+             str(out_path), str(ocr_out)],
+            check=True,
+        )
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--captures", type=Path, default=Path("capture"))
@@ -223,6 +266,14 @@ def main():
                     help="Number of leading chapters sampled to determine canonical height")
     ap.add_argument("--page-height", type=int, default=0,
                     help="Override the canonical page height for --uniform-pages (0 = auto)")
+    ap.add_argument("--chapters", type=str, default="",
+                    help="Restrict to these chapter indices, e.g. '0-8', '9-23', "
+                         "'0-8,15,17-19'. Empty = all captured chapters.")
+    ap.add_argument("--per-chapter", action="store_true",
+                    help="Emit one PDF per chapter instead of one combined PDF. "
+                         "Use {n} in --out for the 1-based position within the "
+                         "selected range, or {name} for the chapter dir name "
+                         "(e.g. --out 'chapter_{n}.pdf').")
     ap.add_argument("--ocr", action="store_true", help="Run ocrmypdf after assembly")
     ap.add_argument("--ocr-lang", default="eng")
     args = ap.parse_args()
@@ -233,6 +284,15 @@ def main():
     if not chapter_dirs:
         print(f"No chapter directories found under {args.captures}")
         return
+
+    allowed = parse_chapters(args.chapters)
+    if allowed is not None:
+        chapter_dirs = [d for d in chapter_dirs if ch_index(d.name) in allowed]
+        if not chapter_dirs:
+            print(f"No chapter directories match --chapters {args.chapters!r}")
+            return
+        print(f"Selected {len(chapter_dirs)} chapter(s): "
+              f"{[d.name for d in chapter_dirs]}")
 
     # Pass 1: stitch every chapter.
     stitched_paths = []
@@ -273,10 +333,11 @@ def main():
     elif args.split_height > 0:
         page_h = args.split_height
 
-    page_images = []
+    # Produce page images grouped by chapter.
+    per_chapter_pages = []  # list of (ch_name, [page_paths])
     for stitched_path in stitched_paths:
         if page_h is None:
-            page_images.append(stitched_path)
+            per_chapter_pages.append((stitched_path.stem, [stitched_path]))
             continue
         with Image.open(stitched_path) as stitched:
             stitched = stitched.convert("RGB")
@@ -285,25 +346,26 @@ def main():
             if args.uniform_pages:
                 pages = [pad_to_height(p, canonical_h) for p in pages]
         name = stitched_path.stem
+        page_paths = []
         for i, p in enumerate(pages):
             pp = args.stitched / f"{name}_p{i:03d}.png"
             p.save(pp, optimize=True)
-            page_images.append(pp)
+            page_paths.append(pp)
+        per_chapter_pages.append((name, page_paths))
 
-    print(f"\nAssembling PDF from {len(page_images)} pages...")
-    with open(args.out, "wb") as f:
-        f.write(img2pdf.convert([str(p) for p in page_images]))
-    print(f"    -> {args.out}")
-
-    if args.ocr:
-        ocr_out = args.out.with_name(args.out.stem + "_ocr.pdf")
-        print(f"\nRunning OCR -> {ocr_out}")
-        subprocess.run(
-            ["ocrmypdf", "-l", args.ocr_lang, "--output-type", "pdf",
-             str(args.out), str(ocr_out)],
-            check=True,
-        )
-        print("OCR complete.")
+    print()
+    if args.per_chapter:
+        template = str(args.out)
+        if "{n}" not in template and "{name}" not in template:
+            # Auto-append a 1-based counter before the suffix.
+            template = str(args.out.with_name(
+                args.out.stem + "_{n:02d}" + args.out.suffix))
+        for n, (ch_name, page_paths) in enumerate(per_chapter_pages, start=1):
+            out = Path(template.format(n=n, name=ch_name))
+            assemble_pdf(page_paths, out, args.ocr, args.ocr_lang)
+    else:
+        all_pages = [p for _, paths in per_chapter_pages for p in paths]
+        assemble_pdf(all_pages, args.out, args.ocr, args.ocr_lang)
 
 
 if __name__ == "__main__":
