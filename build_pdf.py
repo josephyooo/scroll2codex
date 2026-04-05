@@ -45,12 +45,22 @@ def find_overlap(prev_tail_gray: np.ndarray, next_gray: np.ndarray, strip_h: int
     return best_offset, best_diff
 
 
-def stitch_chapter(shot_paths, crop, strip_h=200, diff_threshold=8.0):
+def stitch_chapter(shot_paths, crop, strip_h=200, diff_threshold=8.0,
+                   min_overlap=None):
     """Stitch screenshots top-to-bottom via overlap detection.
 
     diff_threshold: if best overlap match has mean abs diff larger than this,
-    we assume no overlap (rare) and append with a separator line.
+    we assume weak overlap (rare) and append with a conservative trim.
+
+    min_overlap: pixels to trim from the top of next_arr in the weak-overlap
+    fallback branch. Captures are intentionally overlapping (scroll_delta <
+    viewport_height), so appending the untrimmed frame duplicates content.
+    Defaults to strip_h -- the width of the band we try to match -- which
+    is a conservative lower bound. Users with larger scroll deltas may want
+    to raise this via --min-overlap to reduce residual duplication.
     """
+    if min_overlap is None:
+        min_overlap = strip_h
     imgs = [crop_box(Image.open(p).convert("RGB"), crop) for p in shot_paths]
     if not imgs:
         raise ValueError("no screenshots provided")
@@ -65,9 +75,14 @@ def stitch_chapter(shot_paths, crop, strip_h=200, diff_threshold=8.0):
         offset, diff = find_overlap(tail_gray, next_gray, strip_h)
 
         if diff > diff_threshold:
-            # fall back: append entire next image minus small overlap guess
-            print(f"    [stitch] weak overlap (diff={diff:.1f}); appending conservatively")
-            result = np.vstack([result, next_arr])
+            # Weak overlap: trim a conservative minimum instead of appending
+            # the entire frame (which would duplicate the intended overlap).
+            trim = min(min_overlap, next_arr.shape[0])
+            print(f"    [stitch] weak overlap (diff={diff:.1f}); "
+                  f"trimming {trim}px conservatively")
+            if trim >= next_arr.shape[0]:
+                continue  # nothing new to add
+            result = np.vstack([result, next_arr[trim:]])
             continue
 
         new_y = offset + strip_h
@@ -189,6 +204,10 @@ def main():
                     help="Cap number of screenshots stitched per chapter (0 = all)")
     ap.add_argument("--strip-height", type=int, default=200,
                     help="Overlap-detection strip height in pixels")
+    ap.add_argument("--min-overlap", type=int, default=0,
+                    help="Pixels to trim off the top of each frame in the "
+                         "weak-overlap fallback branch (0 = use --strip-height). "
+                         "Raise this if fallback stitches show duplicated bands.")
     ap.add_argument("--split-height", type=int, default=0,
                     help="Split stitched chapters into pages of ~this height (0 = no split). "
                          "Splits snap to inter-line whitespace so text lines aren't bisected.")
@@ -224,7 +243,11 @@ def main():
         if args.max_shots > 0:
             shot_paths = shot_paths[: args.max_shots]
         print(f"Stitching {ch_dir.name} ({len(shot_paths)} shots)")
-        stitched = stitch_chapter(shot_paths, args.crop, strip_h=args.strip_height)
+        stitched = stitch_chapter(
+            shot_paths, args.crop,
+            strip_h=args.strip_height,
+            min_overlap=args.min_overlap or None,
+        )
         stitched_path = args.stitched / f"{ch_dir.name}.png"
         stitched.save(stitched_path, optimize=True)
         print(f"    -> {stitched_path} ({stitched.size[0]}x{stitched.size[1]})")
