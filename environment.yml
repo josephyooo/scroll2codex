@@ -1,0 +1,14 @@
+name: vs2pdf
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pillow
+  - numpy
+  - img2pdf
+  - pip
+  - pip:
+      - playwright
+# ocrmypdf is installed separately via Homebrew on macOS:
+#   brew install ocrmypdf
+# (conda-forge's ocrmypdf has unmet deps on osx-arm64)
