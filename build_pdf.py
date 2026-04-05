@@ -109,10 +109,12 @@ def main():
     ap.add_argument(
         "--crop",
         type=parse_crop,
-        default=(40, 10, 1870, 1040),
+        default=(130, 40, 1780, 1000),
         help="left,top,right,bottom to crop browser chrome (tuned for 1920x1080). "
              "Use 'none' to skip cropping.",
     )
+    ap.add_argument("--max-shots", type=int, default=0,
+                    help="Cap number of screenshots stitched per chapter (0 = all)")
     ap.add_argument("--strip-height", type=int, default=200,
                     help="Overlap-detection strip height in pixels")
     ap.add_argument("--split-height", type=int, default=0,
@@ -133,6 +135,8 @@ def main():
         shot_paths = sorted(ch_dir.glob("shot_*.png"))
         if not shot_paths:
             continue
+        if args.max_shots > 0:
+            shot_paths = shot_paths[: args.max_shots]
         print(f"Stitching {ch_dir.name} ({len(shot_paths)} shots)")
         stitched = stitch_chapter(shot_paths, args.crop, strip_h=args.strip_height)
         stitched_path = args.stitched / f"{ch_dir.name}.png"
