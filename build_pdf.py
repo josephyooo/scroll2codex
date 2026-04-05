@@ -78,15 +78,87 @@ def stitch_chapter(shot_paths, crop, strip_h=200, diff_threshold=8.0):
     return Image.fromarray(result)
 
 
-def split_into_pages(img: Image.Image, page_h: int):
-    """Split a very tall image into multiple pages of at most page_h rows."""
+def find_blank_rows(img: Image.Image, bg_threshold: int = 245, dark_frac_max: float = 0.003):
+    """Return a boolean array: True where the row is considered whitespace.
+
+    A row counts as blank if fewer than dark_frac_max of its pixels fall below
+    bg_threshold in grayscale. Default 0.3% keeps page fine: a single scraggly
+    pixel of noise per 333 won't disqualify a line gap, but real glyph rows
+    (5-20% dark pixels) will never qualify.
+    """
+    gray = np.asarray(img.convert("L"))
+    dark = gray < bg_threshold
+    dark_frac_per_row = dark.mean(axis=1)
+    return dark_frac_per_row <= dark_frac_max
+
+
+def find_snap_point(blank: np.ndarray, target: int, tolerance: int) -> int:
+    """Find a blank row within +/-tolerance of target; if multiple, pick the
+    center of the widest contiguous blank band. Returns -1 if none found.
+    """
+    lo = max(0, target - tolerance)
+    hi = min(len(blank), target + tolerance + 1)
+    window = blank[lo:hi]
+    if not window.any():
+        return -1
+    # Find contiguous runs of True; pick the run whose center is closest to target.
+    best_center = -1
+    best_score = None
+    i = 0
+    while i < len(window):
+        if not window[i]:
+            i += 1
+            continue
+        j = i
+        while j < len(window) and window[j]:
+            j += 1
+        center = lo + (i + j - 1) // 2
+        # Prefer bands close to target, then wider bands.
+        dist = abs(center - target)
+        width = j - i
+        score = (dist, -width)
+        if best_score is None or score < best_score:
+            best_score = score
+            best_center = center
+        i = j
+    return best_center
+
+
+def pad_to_height(img: Image.Image, target_h: int, bg=(255, 255, 255)):
+    """Return a copy of img padded with whitespace top+bottom to exact target_h.
+    If img is already >= target_h, returns img unchanged.
+    """
+    w, h = img.size
+    if h >= target_h:
+        return img
+    pad_top = (target_h - h) // 2
+    canvas = Image.new("RGB", (w, target_h), bg)
+    canvas.paste(img, (0, pad_top))
+    return canvas
+
+
+def split_into_pages(img: Image.Image, page_h: int, snap_tolerance: int = 60):
+    """Split a very tall image into pages of approximately page_h rows.
+
+    Splits are snapped to inter-line whitespace so no glyph row is bisected.
+    snap_tolerance caps how far from the ideal boundary we'll move to find
+    whitespace; if no blank row exists in the window, we fall back to a hard
+    cut at the target (rare in practice for textbook content).
+    """
     w, h = img.size
     if h <= page_h:
         return [img]
+
+    blank = find_blank_rows(img)
     pages = []
     y = 0
     while y < h:
-        y2 = min(y + page_h, h)
+        ideal = y + page_h
+        if ideal >= h:
+            pages.append(img.crop((0, y, w, h)))
+            break
+        snap = find_snap_point(blank, ideal, snap_tolerance)
+        y2 = snap if snap > y else ideal  # guard against snap going backwards
         pages.append(img.crop((0, y, w, y2)))
         y = y2
     return pages
@@ -118,7 +190,20 @@ def main():
     ap.add_argument("--strip-height", type=int, default=200,
                     help="Overlap-detection strip height in pixels")
     ap.add_argument("--split-height", type=int, default=0,
-                    help="Split stitched chapters into pages of this height (0 = no split)")
+                    help="Split stitched chapters into pages of ~this height (0 = no split). "
+                         "Splits snap to inter-line whitespace so text lines aren't bisected.")
+    ap.add_argument("--snap-tolerance", type=int, default=60,
+                    help="Max pixels the split point may drift from --split-height to find "
+                         "a whitespace row (default 60)")
+    ap.add_argument("--uniform-pages", action="store_true",
+                    help="Auto-detect a canonical page height from the first few chapters, "
+                         "split longer chapters into pages of that height (snapping to "
+                         "whitespace), and pad shorter pages with whitespace top+bottom "
+                         "to the canonical height. Result: every PDF page is identical size.")
+    ap.add_argument("--uniform-sample", type=int, default=4,
+                    help="Number of leading chapters sampled to determine canonical height")
+    ap.add_argument("--page-height", type=int, default=0,
+                    help="Override the canonical page height for --uniform-pages (0 = auto)")
     ap.add_argument("--ocr", action="store_true", help="Run ocrmypdf after assembly")
     ap.add_argument("--ocr-lang", default="eng")
     args = ap.parse_args()
@@ -130,7 +215,8 @@ def main():
         print(f"No chapter directories found under {args.captures}")
         return
 
-    page_images = []
+    # Pass 1: stitch every chapter.
+    stitched_paths = []
     for ch_dir in chapter_dirs:
         shot_paths = sorted(ch_dir.glob("shot_*.png"))
         if not shot_paths:
@@ -142,15 +228,44 @@ def main():
         stitched_path = args.stitched / f"{ch_dir.name}.png"
         stitched.save(stitched_path, optimize=True)
         print(f"    -> {stitched_path} ({stitched.size[0]}x{stitched.size[1]})")
+        stitched_paths.append(stitched_path)
 
-        if args.split_height > 0:
-            pages = split_into_pages(stitched, args.split_height)
-            for i, p in enumerate(pages):
-                pp = args.stitched / f"{ch_dir.name}_p{i:03d}.png"
-                p.save(pp, optimize=True)
-                page_images.append(pp)
+    # Pass 2: decide page layout and (optionally) split + pad.
+    canonical_h = None
+    page_h = None
+    if args.uniform_pages:
+        if args.page_height > 0:
+            canonical_h = args.page_height
+            print(f"\nUsing --page-height override: {canonical_h}px")
         else:
+            sample_n = min(args.uniform_sample, len(stitched_paths))
+            sample_heights = []
+            for p in stitched_paths[:sample_n]:
+                with Image.open(p) as im:
+                    sample_heights.append(im.size[1])
+            canonical_h = min(sample_heights)
+            print(f"\nCanonical page height: {canonical_h}px "
+                  f"(min of first {sample_n}: {sample_heights})")
+        page_h = canonical_h
+    elif args.split_height > 0:
+        page_h = args.split_height
+
+    page_images = []
+    for stitched_path in stitched_paths:
+        if page_h is None:
             page_images.append(stitched_path)
+            continue
+        with Image.open(stitched_path) as stitched:
+            stitched = stitched.convert("RGB")
+            pages = split_into_pages(stitched, page_h,
+                                     snap_tolerance=args.snap_tolerance)
+            if args.uniform_pages:
+                pages = [pad_to_height(p, canonical_h) for p in pages]
+        name = stitched_path.stem
+        for i, p in enumerate(pages):
+            pp = args.stitched / f"{name}_p{i:03d}.png"
+            p.save(pp, optimize=True)
+            page_images.append(pp)
 
     print(f"\nAssembling PDF from {len(page_images)} pages...")
     with open(args.out, "wb") as f:
