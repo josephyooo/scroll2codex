@@ -1,5 +1,7 @@
 # scroll2codex
 
+> **Note**: This project was built entirely with [Claude Code](https://claude.ai/claude-code). Code, documentation, and commit messages were AI-generated with human direction and review.
+
 Turn a scrolling ebook reader into a uniform, searchable PDF.
 
 Many ebook platforms render books into an infinite-scroll web reader rather
