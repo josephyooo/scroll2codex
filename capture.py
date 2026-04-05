@@ -223,11 +223,26 @@ def find_resume_idx(out_dir: Path, start: int, end: int) -> int:
 
 
 async def capture_chapter(page, ch_idx, out_dir, scroll_delta, settle_ms, max_scrolls, force):
+    """Capture screenshots for one chapter.
+
+    Returns (n_shots, reason) where reason is one of:
+      - "already_done"    : .done marker existed; chapter skipped (n_shots=0)
+      - "bottom_reached"  : scroll loop terminated because screenshots stopped
+                            changing -> chapter fully captured
+      - "crossed_chapter" : scroll drifted into the next chapter mid-capture;
+                            the browser is now on a different chapter than we
+                            started on. Chapter was NOT fully captured.
+      - "max_scrolls"     : hit the safety cap without detecting the bottom.
+                            Chapter was NOT fully captured.
+
+    Only "already_done" and "bottom_reached" write the .done marker. The other
+    reasons leave .done absent so resume logic will retry the chapter.
+    """
     ch_dir = out_dir / f"ch{ch_idx:02d}"
     done_marker = ch_dir / ".done"
     if done_marker.exists() and not force:
         print(f"  ch{ch_idx:02d} already captured, skipping (use --force to redo)")
-        return 0
+        return 0, "already_done"
     ch_dir.mkdir(parents=True, exist_ok=True)
 
     meta = await rpc(page, "Book.getCurrentPage")
@@ -250,11 +265,13 @@ async def capture_chapter(page, ch_idx, out_dir, scroll_delta, settle_ms, max_sc
     start_path = meta.get("path")
     prev_hash = None
     n_shots = 0
+    reason = "max_scrolls"
 
     for i in range(max_scrolls):
         png = await page.screenshot(type="png", full_page=False)
         h = png_hash(png)
         if h == prev_hash:
+            reason = "bottom_reached"
             break  # screenshot stopped changing -> bottom reached
         (ch_dir / f"shot_{i:03d}.png").write_bytes(png)
         n_shots += 1
@@ -266,11 +283,19 @@ async def capture_chapter(page, ch_idx, out_dir, scroll_delta, settle_ms, max_sc
         # Guard: if we accidentally scrolled into next chapter, stop
         cur = await rpc(page, "Book.getCurrentPage")
         if cur.get("path") != start_path:
+            reason = "crossed_chapter"
             break
 
-    done_marker.touch()
-    print(f"    captured {n_shots} screenshots")
-    return n_shots
+    if reason == "bottom_reached":
+        done_marker.touch()
+        print(f"    captured {n_shots} screenshots")
+    elif reason == "crossed_chapter":
+        print(f"    [warn] drifted into next chapter after {n_shots} screenshots; "
+              f"ch{ch_idx:02d} not marked .done")
+    else:  # max_scrolls
+        print(f"    [warn] hit max_scrolls={max_scrolls} after {n_shots} screenshots; "
+              f"ch{ch_idx:02d} not marked .done (increase --max-scrolls or use --force)")
+    return n_shots, reason
 
 
 async def main():
@@ -377,7 +402,7 @@ async def main():
                     print(f"  advanced to index {cur_idx}")
 
         while cur_idx < end:
-            await capture_chapter(
+            _, reason = await capture_chapter(
                 page, cur_idx, args.out,
                 scroll_delta=args.scroll_delta,
                 settle_ms=args.settle_ms,
@@ -386,13 +411,26 @@ async def main():
             )
             if cur_idx + 1 >= end:
                 break
-            await rpc(page, "Book.goToNextPage")
-            await settle(page, 1000)
-            cur = await rpc(page, "Book.getCurrentPage")
-            new_idx = resolve_idx(cur)
-            if new_idx == cur_idx:
-                print("  [WARN] goToNextPage did not advance; stopping")
-                break
+            if reason == "crossed_chapter":
+                # Scroll loop already drifted into a later chapter. Don't
+                # advance again — resolve where we landed and continue from
+                # there.
+                cur = await rpc(page, "Book.getCurrentPage")
+                new_idx = resolve_idx(cur)
+                if new_idx <= cur_idx:
+                    print("  [WARN] drift detected but browser index did not advance; stopping")
+                    break
+                if new_idx > cur_idx + 1:
+                    print(f"  [WARN] drift skipped chapter(s) {cur_idx + 1}..{new_idx - 1}; "
+                          f"resume will re-run capture.py to backfill")
+            else:
+                await rpc(page, "Book.goToNextPage")
+                await settle(page, 1000)
+                cur = await rpc(page, "Book.getCurrentPage")
+                new_idx = resolve_idx(cur)
+                if new_idx == cur_idx:
+                    print("  [WARN] goToNextPage did not advance; stopping")
+                    break
             cur_idx = new_idx
 
         print(f"\nDone. Screenshots under {args.out}/")
