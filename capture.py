@@ -211,6 +211,17 @@ async def jump_to_chapter(page, book_url, chapters, target_idx, resolve_idx, for
     return landed == target_idx
 
 
+def find_resume_idx(out_dir: Path, start: int, end: int) -> int:
+    """Return the first chapter index in [start, end) without a .done marker.
+
+    Returns `end` if every chapter in the range is already complete.
+    """
+    for i in range(start, end):
+        if not (out_dir / f"ch{i:02d}" / ".done").exists():
+            return i
+    return end
+
+
 async def capture_chapter(page, ch_idx, out_dir, scroll_delta, settle_ms, max_scrolls, force):
     ch_dir = out_dir / f"ch{ch_idx:02d}"
     done_marker = ch_dir / ".done"
@@ -323,21 +334,38 @@ async def main():
                     return i
             return 0
 
-        # Navigate to chapter at args.start
+        end = args.end if args.end is not None else len(chapters)
+
+        # Auto-resume: seek to the first un-done chapter at or after args.start.
+        # --force skips this and uses args.start directly (so done chapters get
+        # recaptured).
+        if args.force:
+            target = args.start
+        else:
+            target = find_resume_idx(args.out, args.start, end)
+            if target >= end:
+                print(f"All chapters in [{args.start}, {end}) already captured. Nothing to do.")
+                await ctx.close()
+                return
+            if target > args.start:
+                print(f"Resuming: {target - args.start} chapter(s) already complete; "
+                      f"starting at index {target}")
+
+        # Navigate to target chapter
         cur = await rpc(page, "Book.getCurrentPage")
         cur_idx = resolve_idx(cur)
-        print(f"Current chapter index: {cur_idx}, target start: {args.start}")
+        print(f"Current chapter index: {cur_idx}, target: {target}")
 
-        if cur_idx != args.start:
+        if cur_idx != target:
             # Try URL jump first (instant), fall back to walking
-            print(f"Jumping to chapter {args.start} via URL...")
-            jumped = await jump_to_chapter(page, args.url, chapters, args.start, resolve_idx)
+            print(f"Jumping to chapter {target} via URL...")
+            jumped = await jump_to_chapter(page, args.url, chapters, target, resolve_idx)
             if jumped:
-                cur_idx = args.start
+                cur_idx = target
                 print(f"  landed at index {cur_idx}")
             else:
                 print("  URL jump failed, walking with goToNextPage")
-                while cur_idx < args.start:
+                while cur_idx < target:
                     await rpc(page, "Book.goToNextPage")
                     await settle(page, 800)
                     cur = await rpc(page, "Book.getCurrentPage")
@@ -348,7 +376,6 @@ async def main():
                     cur_idx = new_idx
                     print(f"  advanced to index {cur_idx}")
 
-        end = args.end if args.end is not None else len(chapters)
         while cur_idx < end:
             await capture_chapter(
                 page, cur_idx, args.out,
