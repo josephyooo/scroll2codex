@@ -8,6 +8,7 @@ Usage:
 """
 import argparse
 import re
+import string
 import subprocess
 from pathlib import Path
 
@@ -217,6 +218,22 @@ def ch_index(name: str):
     return int(m.group(1)) if m else None
 
 
+def template_has_field(template: str, *names: str) -> bool:
+    """True if `template` references any of the given root field names.
+
+    Uses string.Formatter().parse() so format specs and conversions count:
+    `{n}`, `{n:02d}`, `{n!r}`, `{n.attr}`, and `{n[0]}` all match name='n'.
+    """
+    wanted = set(names)
+    for _, field_name, _, _ in string.Formatter().parse(template):
+        if field_name is None:
+            continue
+        root = field_name.split(".", 1)[0].split("[", 1)[0]
+        if root in wanted:
+            return True
+    return False
+
+
 def assemble_pdf(page_images, out_path: Path, ocr: bool, ocr_lang: str):
     print(f"Assembling PDF from {len(page_images)} pages -> {out_path}")
     with open(out_path, "wb") as f:
@@ -356,7 +373,7 @@ def main():
     print()
     if args.per_chapter:
         template = str(args.out)
-        if "{n}" not in template and "{name}" not in template:
+        if not template_has_field(template, "n", "name"):
             # Auto-append a 1-based counter before the suffix.
             template = str(args.out.with_name(
                 args.out.stem + "_{n:02d}" + args.out.suffix))
