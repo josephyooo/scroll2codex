@@ -1,6 +1,6 @@
 # scroll2codex
 
-> **Note**: This project was built entirely with [Claude Code](https://claude.ai/claude-code). Code, documentation, and commit messages were AI-generated with human direction and review.
+> **Note**: This project was built with [Claude Code](https://claude.ai/claude-code). Code, documentation, and commit messages were AI-generated with human direction and review.
 
 Turn a scrolling ebook reader into a uniform, searchable PDF.
 
@@ -59,6 +59,25 @@ python build_pdf.py --captures capture/ --out book.pdf --uniform-pages
 - `--split-height N` (alternative to `--uniform-pages`) uses a fixed target.
 - `--max-shots N` stitches only the first N screenshots per chapter, for
   quick iteration on crop/split tuning.
+- `--chapters SPEC` restricts the build to a subset of chapters. SPEC is a
+  comma-separated list of indices or ranges, e.g. `"0-8"`, `"9-23"`, or
+  `"0-8,15,17-19"`.
+- `--per-chapter` emits one PDF per selected chapter instead of one combined
+  PDF. Use `{n}` in `--out` for the 1-based position within the selected
+  range, or `{name}` for the chapter dir name (e.g. `--out "chapter_{n}.pdf"`).
+
+**Splitting a book into front matter + per-chapter PDFs:**
+
+```bash
+# Bundle the front matter (chapters 0-8) as one PDF.
+python build_pdf.py --captures capture/ --out front_matter.pdf \
+    --chapters 0-8 --uniform-pages
+
+# Then emit each content chapter as its own PDF, reusing the same canonical
+# page height (printed by the first command) so every PDF lays out identically.
+python build_pdf.py --captures capture/ --out "chapter_{n}.pdf" \
+    --chapters 9-23 --per-chapter --uniform-pages --page-height <N>
+```
 
 ### 3. OCR
 
