@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Capture VitalSource book pages via Playwright-driven browser.
+"""Capture scrolling ebook-reader pages via Playwright-driven browser.
 
 First run: log in manually in the launched browser. Profile is persisted
-to ~/.vs2pdf_profile so subsequent runs stay logged in.
+to ~/.scroll2codex_profile so subsequent runs stay logged in.
 
 Usage:
-    python capture.py --url 'https://bookshelf.vitalsource.com/reader/books/...'
+    python capture.py --url 'https://reader.example.com/books/...'
     python capture.py --url ... --start 2 --end 3   # only chapter index 2
 """
 import argparse
@@ -17,7 +17,7 @@ from pathlib import Path
 from urllib.parse import quote, urlparse
 from playwright.async_api import async_playwright
 
-PROFILE_DIR = Path.home() / ".vs2pdf_profile"
+PROFILE_DIR = Path.home() / ".scroll2codex_profile"
 
 JS_WAIT_READY = """
 () => !!(window.Viewer && typeof window.Viewer.callMethod === 'function')
